@@ -1,0 +1,22 @@
+/usr/local/bin/python3.12 /Users/sathishm/Documents/Python Works/IIMK-Hackathon/Main Code.py
+Processing publishable PDFs: 100%|██████████| 11/11 [00:00<00:00, 16.19it/s]
+Processing non-publishable PDFs: 100%|██████████| 5/5 [00:00<00:00, 13.56it/s]
+LOO Cross-Validation: 20it [00:00, 592.93it/s]
+      Metric     Value
+0   Accuracy  0.950000
+1  Precision  0.909091
+2     Recall  1.000000
+3   F1 Score  0.952381
+Classifying input PDFs: 100%|██████████| 135/135 [00:06<00:00, 22.00it/s]
+
+Latency Summary:
+                   Step  Latency (seconds)
+0      Publishable PDFs           0.686510
+1  Non-Publishable PDFs           0.369580
+2         Vectorization           0.026877
+3          Oversampling           0.001421
+4        Model Training           0.004454
+5  LOO Cross-Validation           0.033867
+6        Classification           6.135865
+
+Process finished with exit code 0
