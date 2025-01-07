@@ -1,60 +1,35 @@
 import os
+import tempfile
 import fitz
 import pdfplumber
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
-from tensorflow.keras.models import Sequential
+from tensorflow.keras.models import Sequential, load_model
 from tensorflow.keras.layers import Dense, Dropout
 from tensorflow.keras.regularizers import l2
 from tensorflow.keras.utils import to_categorical
 from transformers import pipeline
 from fastapi import FastAPI, File, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 import shutil
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
 app = FastAPI()
 
-# Load summarization model (Specify GPU usage)
-summarizer = pipeline("summarization", model="t5-small", framework="pt", device=0)
+# Load summarization model (set to use CPU)
+summarizer = pipeline("summarization", model="t5-small", framework="pt", device=-1)
 
-# Set random seed
+# Set random seed for reproducibility
 SEED = 42
 np.random.seed(SEED)
 
-# Function to extract text from PDFs
-def extract_text_from_pdf(file_path):
-    try:
-        with fitz.open(file_path) as pdf:
-            text = ""
-            for page in pdf:
-                text += page.get_text()
-            if text.strip():
-                return text.strip()
-    except Exception as e:
-        print(f"PyMuPDF failed for {file_path}: {e}")
-    try:
-        with pdfplumber.open(file_path) as pdf:
-            text = " ".join(page.extract_text() for page in pdf.pages if page.extract_text())
-            return text.strip()
-    except Exception as e:
-        print(f"pdfplumber failed for {file_path}: {e}")
-        return ""
-
-# Generate rationale for predictions
-def generate_rationale(paper_content, prediction):
-    try:
-        truncated_content = paper_content[:1000]
-        summarized_content = summarizer(truncated_content, max_length=100, min_length=30, do_sample=False)[0]['summary_text']
-        rationale = f"{summarized_content} This paper aligns with the themes of '{prediction}' due to its focus on topics and methods commonly explored in {prediction} research."
-        return rationale
-    except Exception as e:
-        print(f"Error generating rationale: {e}")
-        return f"Rationale generation failed due to an error: {str(e)}"
-
-# Load dummy training data (replace this with actual Publishable and Non-Publishable PDFs)
+# Dummy training data for demonstration purposes
 texts = ["This is a publishable research paper on AI.", "This paper does not meet publishable standards."]
 labels = ["Publishable", "Non-Publishable"]
 
@@ -67,28 +42,57 @@ vectorizer = TfidfVectorizer(max_features=1000, stop_words='english')
 X = vectorizer.fit_transform(texts).toarray()
 y = to_categorical(labels_encoded, num_classes=len(label_encoder.classes_))
 
-# Train/test split
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=SEED)
-
-# Build the model
-model = Sequential([
-    Dense(128, activation='relu', kernel_regularizer=l2(0.001), input_shape=(X_train.shape[1],)),
-    Dropout(0.5),
-    Dense(64, activation='relu', kernel_regularizer=l2(0.001)),
-    Dropout(0.4),
-    Dense(len(label_encoder.classes_), activation='softmax')
-])
-model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
-
-# Handle insufficient data for validation
-if len(X_train) < 5:
-    print("Insufficient data for validation split. Skipping validation.")
-    model.fit(X_train, y_train, epochs=5, batch_size=16)
+# Build the model (if not pre-trained)
+if not os.path.exists("paper_classifier.h5"):
+    model = Sequential([
+        Dense(128, activation='relu', kernel_regularizer=l2(0.001), input_shape=(X.shape[1],)),
+        Dropout(0.5),
+        Dense(64, activation='relu', kernel_regularizer=l2(0.001)),
+        Dropout(0.4),
+        Dense(len(label_encoder.classes_), activation='softmax')
+    ])
+    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+    model.fit(X, y, epochs=5, batch_size=16)
+    model.save("paper_classifier.h5")
 else:
-    model.fit(X_train, y_train, epochs=5, batch_size=16, validation_split=0.2)
+    model = load_model("paper_classifier.h5")
 
 # Define conferences for recommendations
 conferences = ["CVPR", "NeurIPS", "DAA", "EMNLP", "KDD"]
+
+
+# Function to extract text from PDFs
+def extract_text_from_pdf(file_path):
+    try:
+        with fitz.open(file_path) as pdf:
+            text = ""
+            for page in pdf:
+                text += page.get_text()
+            if text.strip():
+                return text.strip()
+    except Exception as e:
+        logger.error(f"PyMuPDF failed for {file_path}: {e}")
+    try:
+        with pdfplumber.open(file_path) as pdf:
+            text = " ".join(page.extract_text() for page in pdf.pages if page.extract_text())
+            return text.strip()
+    except Exception as e:
+        logger.error(f"pdfplumber failed for {file_path}: {e}")
+    return ""
+
+
+# Generate rationale for predictions
+def generate_rationale(paper_content, prediction):
+    try:
+        truncated_content = paper_content[:1000]
+        summarized_content = summarizer(truncated_content, max_length=100, min_length=30, do_sample=False)[0][
+            'summary_text']
+        rationale = f"{summarized_content} This paper aligns with the themes of '{prediction}' due to its focus on topics and methods commonly explored in {prediction} research."
+        return rationale
+    except Exception as e:
+        logger.error(f"Error generating rationale: {e}")
+        return f"Rationale generation failed due to an error: {str(e)}"
+
 
 # Web interface
 @app.get("/")
@@ -110,21 +114,26 @@ def upload_form():
     </html>
     """)
 
+
 @app.post("/upload/")
 async def classify_files(files: list[UploadFile] = File(...)):
     input_texts = []
     input_files = []
+
     for file in files:
-        file_path = f"/tmp/{file.filename}"
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        text = extract_text_from_pdf(file_path)
+        if file.content_type != "application/pdf":
+            return JSONResponse(content={"error": f"File {file.filename} is not a valid PDF."}, status_code=400)
+
+        with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+            shutil.copyfileobj(file.file, temp_file)
+            text = extract_text_from_pdf(temp_file.name)
+
         if text:
             input_texts.append(text)
             input_files.append(file.filename)
 
     if not input_texts:
-        return HTMLResponse(content="<h2>No valid PDF files were uploaded.</h2>")
+        return JSONResponse(content={"error": "No valid PDF files were uploaded."}, status_code=400)
 
     # Vectorize and predict
     input_vectors = vectorizer.transform(input_texts).toarray()
@@ -134,7 +143,6 @@ async def classify_files(files: list[UploadFile] = File(...)):
     # Generate results
     results = []
     for file, text, prediction in zip(input_files, input_texts, predicted_labels):
-        # Randomly assign a conference for demonstration purposes
         conference = np.random.choice(conferences)
         rationale = generate_rationale(text, conference)
         results.append({
@@ -166,6 +174,8 @@ async def classify_files(files: list[UploadFile] = File(...)):
     """
     return HTMLResponse(content=html_content)
 
+
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="127.0.0.1", port=8000)
