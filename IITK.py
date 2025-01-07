@@ -38,41 +38,32 @@ def load_data(directory, label):
 publishable_dir = "/Users/sathishm/Downloads/Publishable"
 non_publishable_dir = "/Users/sathishm/Downloads/Non-Publishable"
 
-# Load data
 publishable_texts, publishable_labels, _ = load_data(publishable_dir, 1)
 non_publishable_texts, non_publishable_labels, _ = load_data(non_publishable_dir, 0)
 
-# Combine data
 texts = publishable_texts + non_publishable_texts
 labels = publishable_labels + non_publishable_labels
 
-# Feature extraction using TF-IDF
 vectorizer = TfidfVectorizer(max_features=5000, stop_words='english')
 X = vectorizer.fit_transform(texts).toarray()
 y = np.array(labels)
 
-# Split into training and test sets
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-# Train a classifier
 model = RandomForestClassifier(n_estimators=100, random_state=42)
 model.fit(X_train, y_train)
 
-# Evaluate the model
 y_pred = model.predict(X_test)
 print(classification_report(y_test, y_pred))
 
-# Save the model and vectorizer
 joblib.dump(model, "publishability_classifier.pkl")
 joblib.dump(vectorizer, "tfidf_vectorizer.pkl")
 
-# Load new input files for assessment
 input_dir = "/Users/sathishm/Downloads/IITK-Input"
 output_dir = "/Users/sathishm/Downloads/IITK"
 os.makedirs(output_dir, exist_ok=True)
 output_file_path = os.path.join(output_dir, "publishability_results.xlsx")
 
-# Analyze input files
 input_texts, _, input_files = load_data(input_dir, None)
 
 results = []
@@ -82,7 +73,6 @@ for file_name, text in zip(input_files, input_texts):
         prediction = model.predict(features)
         results.append({"Paper ID": file_name, "Publishable": int(prediction[0])})
 
-# Save results to Excel
 df = pd.DataFrame(results)
 df.to_excel(output_file_path, index=False)
 

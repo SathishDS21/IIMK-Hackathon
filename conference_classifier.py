@@ -15,34 +15,26 @@ from fastapi.responses import HTMLResponse, JSONResponse
 import shutil
 import logging
 
-# Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize FastAPI app
 app = FastAPI()
 
-# Load summarization model (set to use CPU)
 summarizer = pipeline("summarization", model="t5-small", framework="pt", device=-1)
 
-# Set random seed for reproducibility
 SEED = 42
 np.random.seed(SEED)
 
-# Dummy training data for demonstration purposes
 texts = ["This is a publishable research paper on AI.", "This paper does not meet publishable standards."]
 labels = ["Publishable", "Non-Publishable"]
 
-# Encode labels
 label_encoder = LabelEncoder()
 labels_encoded = label_encoder.fit_transform(labels)
 
-# Vectorize text
 vectorizer = TfidfVectorizer(max_features=1000, stop_words='english')
 X = vectorizer.fit_transform(texts).toarray()
 y = to_categorical(labels_encoded, num_classes=len(label_encoder.classes_))
 
-# Build the model (if not pre-trained)
 if not os.path.exists("paper_classifier.h5"):
     model = Sequential([
         Dense(128, activation='relu', kernel_regularizer=l2(0.001), input_shape=(X.shape[1],)),
@@ -57,11 +49,9 @@ if not os.path.exists("paper_classifier.h5"):
 else:
     model = load_model("paper_classifier.h5")
 
-# Define conferences for recommendations
 conferences = ["CVPR", "NeurIPS", "DAA", "EMNLP", "KDD"]
 
 
-# Function to extract text from PDFs
 def extract_text_from_pdf(file_path):
     try:
         with fitz.open(file_path) as pdf:
@@ -81,7 +71,6 @@ def extract_text_from_pdf(file_path):
     return ""
 
 
-# Generate rationale for predictions
 def generate_rationale(paper_content, prediction):
     try:
         truncated_content = paper_content[:1000]
@@ -94,7 +83,6 @@ def generate_rationale(paper_content, prediction):
         return f"Rationale generation failed due to an error: {str(e)}"
 
 
-# Web interface
 @app.get("/")
 def upload_form():
     return HTMLResponse(content="""
@@ -135,12 +123,10 @@ async def classify_files(files: list[UploadFile] = File(...)):
     if not input_texts:
         return JSONResponse(content={"error": "No valid PDF files were uploaded."}, status_code=400)
 
-    # Vectorize and predict
     input_vectors = vectorizer.transform(input_texts).toarray()
     predictions = model.predict(input_vectors)
     predicted_labels = label_encoder.inverse_transform(np.argmax(predictions, axis=1))
 
-    # Generate results
     results = []
     for file, text, prediction in zip(input_files, input_texts, predicted_labels):
         conference = np.random.choice(conferences)
@@ -152,7 +138,6 @@ async def classify_files(files: list[UploadFile] = File(...)):
             "Rationale": rationale
         })
 
-    # Create HTML table
     table_rows = "".join(
         f"<tr><td>{result['File Name']}</td><td>{result['Prediction']}</td><td>{result['Conference']}</td><td>{result['Rationale']}</td></tr>"
         for result in results

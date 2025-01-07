@@ -7,7 +7,6 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report
 import tensorflow as tf
 
-# Function to extract text from PDF
 def extract_text_from_pdf(file_path):
     try:
         with open(file_path, 'rb') as file:
@@ -18,7 +17,7 @@ def extract_text_from_pdf(file_path):
         print(f"Error reading {file_path}: {e}")
         return ""
 
-# Load data from directories
+
 def load_data(directory, label):
     texts = []
     labels = []
@@ -31,30 +30,24 @@ def load_data(directory, label):
                 if text:
                     texts.append(text)
                     labels.append(label)
-                    file_names.append(file)  # Store file name for tracking
+                    file_names.append(file)
     return texts, labels, file_names
 
-# Directories for supervised learning
 publishable_dir = "/Users/sathishm/Downloads/Publishable"
 non_publishable_dir = "/Users/sathishm/Downloads/Non-Publishable"
 
-# Load data
 publishable_texts, publishable_labels, _ = load_data(publishable_dir, 1)
 non_publishable_texts, non_publishable_labels, _ = load_data(non_publishable_dir, 0)
 
-# Combine data
 texts = publishable_texts + non_publishable_texts
 labels = publishable_labels + non_publishable_labels
 
-# Feature extraction using TF-IDF
 vectorizer = TfidfVectorizer(max_features=5000, stop_words='english')
 X = vectorizer.fit_transform(texts).toarray()
 y = np.array(labels)
 
-# Split into training and test sets
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-# Build a neural network model
 model = tf.keras.Sequential([
     tf.keras.layers.Dense(128, activation='relu', input_shape=(X_train.shape[1],)),
     tf.keras.layers.Dropout(0.3),
@@ -64,25 +57,20 @@ model = tf.keras.Sequential([
 
 model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
 
-# Train the model
 history = model.fit(X_train, y_train, epochs=10, batch_size=32, validation_split=0.2, verbose=1)
 
-# Evaluate the model
 y_pred = (model.predict(X_test) > 0.5).astype(int)
 print(classification_report(y_test, y_pred))
 
-# Save the model and vectorizer
 model.save("publishability_neural_model.h5")
 import joblib
 joblib.dump(vectorizer, "tfidf_vectorizer.pkl")
 
-# Load new input files for assessment
 input_dir = "/Users/sathishm/Downloads/IITK-Input"
 output_dir = "/Users/sathishm/Downloads/IITK"
 os.makedirs(output_dir, exist_ok=True)
 output_file_path = os.path.join(output_dir, "NeuralNetwork.publishability_results.xlsx")
 
-# Analyze input files
 input_texts, _, input_files = load_data(input_dir, None)
 
 results = []
@@ -92,7 +80,6 @@ for file_name, text in zip(input_files, input_texts):
         prediction = (model.predict(features) > 0.5).astype(int)
         results.append({"Paper ID": file_name, "Publishable": int(prediction[0][0])})
 
-# Save results to Excel
 df = pd.DataFrame(results)
 df.to_excel(output_file_path, index=False)
 
