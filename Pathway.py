@@ -1,86 +1,187 @@
 import os
-import PyPDF2
-import numpy as np
+import time
 import pandas as pd
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report
-import tensorflow as tf
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from sklearn.svm import SVC
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import StratifiedKFold, train_test_split, cross_val_score, GridSearchCV
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+import PyPDF2
+from tqdm import tqdm
+from joblib import dump, load
+from collections import Counter
+import multiprocessing
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+multiprocessing.set_start_method('spawn', force=True)
+
+input_dir = "/Users/sathishm/Documents/IITK-Input"
+output_dir = "/Users/sathishm/Documents/IITK-Output"
+publishable_dir = "/Users/sathishm/Documents/Publishable"
+non_publishable_dir = "/Users/sathishm/Documents/Non-Publishable"
+
+model_file = os.path.join(output_dir, "Task1_model.pkl")
+pca_file = os.path.join(output_dir, "Task1_pca.pkl")
+scaler_file = os.path.join(output_dir, "Task1_scaler.pkl")
 
 def extract_text_from_pdf(file_path):
     try:
-        with open(file_path, 'rb') as file:
-            reader = PyPDF2.PdfReader(file)
-            text = " ".join(page.extract_text() for page in reader.pages if page.extract_text())
+        with open(file_path, 'rb') as f:
+            pdf_reader = PyPDF2.PdfReader(f)
+            text = ""
+            for page_num in range(len(pdf_reader.pages)):
+                text += pdf_reader.pages[page_num].extract_text()
         return text
-    except Exception as e:
-        print(f"Error reading {file_path}: {e}")
+    except Exception:
         return ""
 
+if os.path.exists(model_file) and os.path.exists(pca_file) and os.path.exists(scaler_file):
+    retrain = input("A trained model is found. Would you like to retrain the model? (Y/N): ").strip().upper()
+else:
+    print("No trained model found. Proceeding to train the model...")
+    retrain = 'Y'
 
-def load_data(directory, label):
-    texts = []
-    labels = []
-    file_names = []
-    for root, _, files in os.walk(directory):
-        for file in files:
-            if file.endswith('.pdf'):
-                file_path = os.path.join(root, file)
-                text = extract_text_from_pdf(file_path)
-                if text:
-                    texts.append(text)
-                    labels.append(label)
-                    file_names.append(file)
-    return texts, labels, file_names
+if retrain == 'Y':
+    data = []
+    print("Processing PDFs...")
+    start_time = time.time()
+    for filename in tqdm(os.listdir(publishable_dir), desc="Processing publishable PDFs"):
+        if filename.endswith(".pdf"):
+            file_path = os.path.join(publishable_dir, filename)
+            text = extract_text_from_pdf(file_path)
+            data.append({'text': text, 'label': 1})
+    publishable_latency = time.time() - start_time
 
-publishable_dir = "/Users/sathishm/Downloads/Publishable"
-non_publishable_dir = "/Users/sathishm/Downloads/Non-Publishable"
+    start_time = time.time()
+    for filename in tqdm(os.listdir(non_publishable_dir), desc="Processing non-publishable PDFs"):
+        if filename.endswith(".pdf"):
+            file_path = os.path.join(non_publishable_dir, filename)
+            text = extract_text_from_pdf(file_path)
+            data.append({'text': text, 'label': 0})
+    non_publishable_latency = time.time() - start_time
 
-publishable_texts, publishable_labels, _ = load_data(publishable_dir, 1)
-non_publishable_texts, non_publishable_labels, _ = load_data(non_publishable_dir, 0)
+    df = pd.DataFrame(data)
+    print(f"Class distribution: {Counter(df['label'])}")
 
-texts = publishable_texts + non_publishable_texts
-labels = publishable_labels + non_publishable_labels
+    embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+    start_time = time.time()
+    X = embedding_model.encode(df['text'].tolist())
+    y = df['label']
+    vectorization_latency = time.time() - start_time
 
-vectorizer = TfidfVectorizer(max_features=5000, stop_words='english')
-X = vectorizer.fit_transform(texts).toarray()
-y = np.array(labels)
+    # Normalize embeddings before PCA
+    scaler = StandardScaler()
+    X_normalized = scaler.fit_transform(X)
 
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    # Save the scaler for later use
+    dump(scaler, scaler_file)
 
-model = tf.keras.Sequential([
-    tf.keras.layers.Dense(128, activation='relu', input_shape=(X_train.shape[1],)),
-    tf.keras.layers.Dropout(0.3),
-    tf.keras.layers.Dense(64, activation='relu'),
-    tf.keras.layers.Dense(1, activation='sigmoid')  # Binary classification
-])
+    # PCA with normalized data
+    max_components = min(X_normalized.shape[0], X_normalized.shape[1])
+    n_components = min(100, max_components)
+    print(f"Using PCA with n_components={n_components}")
+    pca = PCA(n_components=n_components)
+    X_pca = pca.fit_transform(X_normalized)
+    pca_latency = time.time() - start_time
 
-model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+    dump(pca, pca_file)
 
-history = model.fit(X_train, y_train, epochs=10, batch_size=32, validation_split=0.2, verbose=1)
+    X_train, X_test, y_train, y_test = train_test_split(X_pca, y, test_size=0.3, random_state=42)
 
-y_pred = (model.predict(X_test) > 0.5).astype(int)
-print(classification_report(y_test, y_pred))
+    print("Tuning SVM model...")
+    # Parameter grid for SVM
+    param_grid = {
+        'C': [0.1, 1, 10],  # Regularization parameter
+        'kernel': ['linear', 'rbf'],  # Linear and RBF kernels
+        'gamma': ['scale', 'auto']  # Kernel coefficient for RBF
+    }
+    svm = SVC(probability=True, random_state=42)
+    grid_search = GridSearchCV(estimator=svm, param_grid=param_grid, cv=5, scoring='f1', verbose=0, n_jobs=-1)
+    grid_search.fit(X_train, y_train)
 
-model.save("publishability_neural_model.h5")
-import joblib
-joblib.dump(vectorizer, "tfidf_vectorizer.pkl")
+    model = grid_search.best_estimator_
+    dump(model, model_file)
 
-input_dir = "/Users/sathishm/Downloads/IITK-Input"
-output_dir = "/Users/sathishm/Downloads/IITK"
-os.makedirs(output_dir, exist_ok=True)
-output_file_path = os.path.join(output_dir, "NeuralNetwork.publishability_results.xlsx")
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    cv_scores = cross_val_score(model, X_pca, y, cv=cv, scoring='f1')
 
-input_texts, _, input_files = load_data(input_dir, None)
+    y_pred = model.predict(X_test)
+    accuracy = accuracy_score(y_test, y_pred)
+    precision = precision_score(y_test, y_pred)
+    recall = recall_score(y_test, y_pred)
+    f1 = f1_score(y_test, y_pred)
 
-results = []
-for file_name, text in zip(input_files, input_texts):
-    if text:  # Process only if text is extracted
-        features = vectorizer.transform([text]).toarray()
-        prediction = (model.predict(features) > 0.5).astype(int)
-        results.append({"Paper ID": file_name, "Publishable": int(prediction[0][0])})
+    print("\nModel Scores:")
+    print(f"Accuracy: {accuracy:.2f}")
+    print(f"Precision: {precision:.2f}")
+    print(f"Recall: {recall:.2f}")
+    print(f"F1 Score: {f1:.2f}")
+    print(f"Cross-Validation F1 Score (Mean): {cv_scores.mean():.2f}")
+else:
+    embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+    model = load(model_file)
+    pca = load(pca_file)
+    scaler = load(scaler_file)
 
-df = pd.DataFrame(results)
-df.to_excel(output_file_path, index=False)
+    print("Evaluating the loaded model...")
+    df = pd.DataFrame({'text': ["Dummy data"] * 10, 'label': [0] * 5 + [1] * 5})
+    X = embedding_model.encode(df['text'].tolist())
+    X_normalized = scaler.transform(X)  # Apply normalization using the loaded scaler
+    X_pca = pca.transform(X_normalized)  # Transform with PCA
+    y = df['label']
 
-print(f"Assessment results saved to {output_file_path}")
+    y_pred = model.predict(X_pca)
+    accuracy = accuracy_score(y, y_pred)
+    precision = precision_score(y, y_pred)
+    recall = recall_score(y, y_pred)
+    f1 = f1_score(y, y_pred)
+
+    print("\nLoaded Model Evaluation Scores:")
+    print(f"Accuracy: {accuracy:.2f}")
+    print(f"Precision: {precision:.2f}")
+    print(f"Recall: {recall:.2f}")
+    print(f"F1 Score: {f1:.2f}")
+
+papers = []
+print("Classifying input PDFs...")
+start_time = time.time()
+for filename in tqdm(os.listdir(input_dir), desc="Classifying input PDFs"):
+    if filename.endswith(".pdf"):
+        file_path = os.path.join(input_dir, filename)
+        text = extract_text_from_pdf(file_path)
+        if text:
+            X_test = embedding_model.encode([text])
+            X_test_normalized = scaler.transform(X_test)  # Apply normalization using the loaded scaler
+            X_test_pca = pca.transform(X_test_normalized)
+            prediction = model.predict(X_test_pca)[0]
+            papers.append({'title': filename, 'publishable': prediction})
+classification_latency = time.time() - start_time
+
+results_file_path = os.path.join(output_dir, "paper_classification_results.csv")
+results_df = pd.DataFrame(papers)
+results_df.to_csv(results_file_path, index=False)
+
+if retrain == 'Y':
+    latency_data = {
+        "Step": ["Publishable PDFs", "Non-Publishable PDFs", "Vectorization", "PCA Dimensionality Reduction",
+                 "Model Training and Tuning", "Classification"],
+        "Latency (seconds)": [
+            locals().get('publishable_latency', 'N/A'),
+            locals().get('non_publishable_latency', 'N/A'),
+            locals().get('vectorization_latency', 'N/A'),
+            locals().get('pca_latency', 'N/A'),
+            locals().get('training_latency', 'N/A'),
+            classification_latency
+        ]
+    }
+else:
+    latency_data = {
+        "Step": ["Classification"],
+        "Latency (seconds)": [classification_latency]
+    }
+
+latency_df = pd.DataFrame(latency_data)
+print("\nLatency Summary:")
+print(latency_df)
