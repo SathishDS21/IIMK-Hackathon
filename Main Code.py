@@ -1,177 +1,145 @@
+import openai
 import os
-import time
 import pandas as pd
-import numpy as np
+import pathway as pw
 from sentence_transformers import SentenceTransformer
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.svm import SVC
 from sklearn.decomposition import PCA
-from sklearn.model_selection import StratifiedKFold, train_test_split, cross_val_score, GridSearchCV
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-import PyPDF2
-from tqdm import tqdm
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
 from joblib import dump, load
-from collections import Counter
-import multiprocessing
+from tqdm import tqdm
+import time
+from PyPDF2 import PdfReader
 
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-multiprocessing.set_start_method('spawn', force=True)
+# OpenAI API key
+openai.api_key = "sk-your-api-key"
 
-input_dir = "/Users/sathishm/Documents/IITK-Input"
-output_dir = "/Users/sathishm/Documents/IITK-Output"
-publishable_dir = "/Users/sathishm/Documents/Publishable"
-non_publishable_dir = "/Users/sathishm/Documents/Non-Publishable"
+# Pathway credentials and object IDs
+service_user_credentials_file = "/Users/sathishm/Documents/IITK-Input copy/quantrixsquad-e3e129adda77.json"
+task1_model_id = "GOOGLE_DRIVE_FILE_ID_FOR_TASK1_MODEL"
+task1_pca_id = "GOOGLE_DRIVE_FILE_ID_FOR_TASK1_PCA"
+task1_scaler_id = "GOOGLE_DRIVE_FILE_ID_FOR_TASK1_SCALER"
+task2_model_id = "GOOGLE_DRIVE_FILE_ID_FOR_TASK2_MODEL"
+task2_pca_id = "GOOGLE_DRIVE_FILE_ID_FOR_TASK2_PCA"
+task2_scaler_id = "GOOGLE_DRIVE_FILE_ID_FOR_TASK2_SCALER"
+input_dir_id = "GOOGLE_DRIVE_FOLDER_ID_FOR_INPUT_PAPERS"
 
-model_file = os.path.join(output_dir, "Task1_model.pkl")
-pca_file = os.path.join(output_dir, "Task1_pca.pkl")
+# Load embedding model
+embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 
-def extract_text_from_pdf(file_path):
+# Helper function to process PDFs and extract text
+def extract_text_from_pdf(content):
+    """Extracts text content from a PDF binary."""
     try:
-        with open(file_path, 'rb') as f:
-            pdf_reader = PyPDF2.PdfReader(f)
-            text = ""
-            for page_num in range(len(pdf_reader.pages)):
-                page = pdf_reader.pages[page_num]
-                text += page.extract_text()
+        reader = PdfReader(content)
+        text = "".join(page.extract_text() for page in reader.pages)
         return text
-    except Exception:
+    except Exception as e:
+        print(f"Error extracting text from PDF: {e}")
         return ""
 
-if os.path.exists(model_file) and os.path.exists(pca_file):
-    retrain = input("A trained model is found. Would you like to retrain the model? (Y/N): ").strip().upper()
-else:
-    print("No trained model found. Proceeding to train the model...")
-    retrain = 'Y'
+# Load models from Google Drive using Pathway
+@pw.transform
+def load_models(row):
+    """Save model files locally from Google Drive content."""
+    content = row.get("content", b"")
+    filename = row.get("filename", "model.pkl")
+    folder = "/path/to/local/models"
+    os.makedirs(folder, exist_ok=True)
+    file_path = os.path.join(folder, filename)
+    with open(file_path, "wb") as f:
+        f.write(content)
+    return {"file_path": file_path}
 
-if retrain == 'Y':
-    data = []
-    print("Processing PDFs...")
-    start_time = time.time()
-    for filename in tqdm(os.listdir(publishable_dir), desc="Processing publishable PDFs"):
-        if filename.endswith(".pdf"):
-            file_path = os.path.join(publishable_dir, filename)
-            text = extract_text_from_pdf(file_path)
-            data.append({'text': text, 'label': 1})
-    publishable_latency = time.time() - start_time
+# Task 1 model loading
+task1_model_table = pw.io.gdrive.read(
+    object_id=task1_model_id, service_user_credentials_file=service_user_credentials_file
+)
+task1_pca_table = pw.io.gdrive.read(
+    object_id=task1_pca_id, service_user_credentials_file=service_user_credentials_file
+)
+task1_scaler_table = pw.io.gdrive.read(
+    object_id=task1_scaler_id, service_user_credentials_file=service_user_credentials_file
+)
 
-    start_time = time.time()
-    for filename in tqdm(os.listdir(non_publishable_dir), desc="Processing non-publishable PDFs"):
-        if filename.endswith(".pdf"):
-            file_path = os.path.join(non_publishable_dir, filename)
-            text = extract_text_from_pdf(file_path)
-            data.append({'text': text, 'label': 0})
-    non_publishable_latency = time.time() - start_time
+task1_model_result = load_models(task1_model_table)
+task1_pca_result = load_models(task1_pca_table)
+task1_scaler_result = load_models(task1_scaler_table)
 
-    df = pd.DataFrame(data)
-    print(f"Class distribution: {Counter(df['label'])}")
+# Task 2 model loading
+task2_model_table = pw.io.gdrive.read(
+    object_id=task2_model_id, service_user_credentials_file=service_user_credentials_file
+)
+task2_pca_table = pw.io.gdrive.read(
+    object_id=task2_pca_id, service_user_credentials_file=service_user_credentials_file
+)
+task2_scaler_table = pw.io.gdrive.read(
+    object_id=task2_scaler_id, service_user_credentials_file=service_user_credentials_file
+)
 
-    embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-    start_time = time.time()
-    X = embedding_model.encode(df['text'].tolist())
-    y = df['label']
-    vectorization_latency = time.time() - start_time
+task2_model_result = load_models(task2_model_table)
+task2_pca_result = load_models(task2_pca_table)
+task2_scaler_result = load_models(task2_scaler_table)
 
-    max_components = min(X.shape[0], X.shape[1])
-    n_components = min(100, max_components)
-    print(f"Using PCA with n_components={n_components}")
-    pca = PCA(n_components=n_components)
-    X_pca = pca.fit_transform(X)
-    pca_latency = time.time() - start_time
+# Run Pathway to load models
+task1_model_path = pw.run(task1_model_result)
+task1_pca_path = pw.run(task1_pca_result)
+task1_scaler_path = pw.run(task1_scaler_result)
+task2_model_path = pw.run(task2_model_result)
+task2_pca_path = pw.run(task2_pca_result)
+task2_scaler_path = pw.run(task2_scaler_result)
 
-    dump(pca, pca_file)
+# Load models into memory
+task1_model = load(task1_model_path[0]['file_path'])
+task1_pca = load(task1_pca_path[0]['file_path'])
+task1_scaler = load(task1_scaler_path[0]['file_path'])
+task2_model = load(task2_model_path[0]['file_path'])
+task2_pca = load(task2_pca_path[0]['file_path'])
+task2_scaler = load(task2_scaler_path[0]['file_path'])
 
-    X_train, X_test, y_train, y_test = train_test_split(X_pca, y, test_size=0.2, random_state=42)
+# Load input papers from Google Drive
+input_table = pw.io.gdrive.read(
+    object_id=input_dir_id, service_user_credentials_file=service_user_credentials_file
+)
 
-    print("Tuning model...")
-    param_grid = {
-        'n_estimators': [50, 100, 200],
-        'max_depth': [5, 10, 20, None],
-        'min_samples_split': [2, 5, 10],
-        'min_samples_leaf': [1, 2, 4],
-    }
-    rf = RandomForestClassifier(class_weight='balanced', random_state=42)
-    grid_search = GridSearchCV(estimator=rf, param_grid=param_grid, cv=5, scoring='f1', verbose=0, n_jobs=-1)
-    grid_search.fit(X_train, y_train)
+@pw.transform
+def process_papers(row):
+    """Process each input paper, classify, and recommend."""
+    filename = row.get("filename", "Unknown")
+    content = row.get("content", b"")
+    try:
+        text = extract_text_from_pdf(content)
+        if not text:
+            return {"filename": filename, "publishable": 0, "conference": "NA", "reason": "NA"}
 
-    model = grid_search.best_estimator_
+        # Task 1: Publishability classification
+        X_test = embedding_model.encode([text])
+        X_test_normalized = task1_scaler.transform(X_test)
+        X_test_pca = task1_pca.transform(X_test_normalized)
+        prediction = task1_model.predict(X_test_pca)[0]
 
-    dump(model, model_file)
+        if prediction == 1:
+            # Task 2: Conference recommendation
+            X_test_conference_normalized = task2_scaler.transform(X_test)
+            X_test_conference_pca = task2_pca.transform(X_test_conference_normalized)
+            conference_pred = task2_model.predict(X_test_conference_pca)[0]
+            conference_name = [k for k, v in conference_mapping.items() if v == conference_pred][0]
 
-    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-    cv_scores = cross_val_score(model, X_pca, y, cv=cv, scoring='f1')
+            # Generate rationale
+            rationale = generate_rationale_gpt3_5(text, conference_name)
 
-    y_pred = model.predict(X_test)
-    accuracy = accuracy_score(y_test, y_pred)
-    precision = precision_score(y_test, y_pred)
-    recall = recall_score(y_test, y_pred)
-    f1 = f1_score(y_test, y_pred)
+            return {"filename": filename, "publishable": 1, "conference": conference_name, "reason": rationale}
+        else:
+            return {"filename": filename, "publishable": 0, "conference": "NA", "reason": "NA"}
+    except Exception as e:
+        return {"filename": filename, "publishable": 0, "conference": "NA", "reason": f"Error: {e}"}
 
-    print("\nModel Scores:")
-    print(f"Accuracy: {accuracy:.2f}")
-    print(f"Precision: {precision:.2f}")
-    print(f"Recall: {recall:.2f}")
-    print(f"F1 Score: {f1:.2f}")
-    print(f"Cross-Validation F1 Score (Mean): {cv_scores.mean():.2f}")
-else:
-    embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-    model = load(model_file)
-    pca = load(pca_file)
-    print("Loaded the existing model and PCA.")
+processed_papers = process_papers(input_table)
+results = pw.run(processed_papers)
 
-    print("Evaluating the loaded model...")
-    df = pd.DataFrame({'text': ["Dummy data"] * 10, 'label': [0] * 5 + [1] * 5})
-    X = embedding_model.encode(df['text'].tolist())
-    X_pca = pca.transform(X)
-    y = df['label']
-
-    y_pred = model.predict(X_pca)
-    accuracy = accuracy_score(y, y_pred)
-    precision = precision_score(y, y_pred)
-    recall = recall_score(y, y_pred)
-    f1 = f1_score(y, y_pred)
-
-    print("\nLoaded Model Evaluation Scores:")
-    print(f"Accuracy: {accuracy:.2f}")
-    print(f"Precision: {precision:.2f}")
-    print(f"Recall: {recall:.2f}")
-    print(f"F1 Score: {f1:.2f}")
-
-papers = []
-print("Classifying input PDFs...")
-start_time = time.time()
-for filename in tqdm(os.listdir(input_dir), desc="Classifying input PDFs"):
-    if filename.endswith(".pdf"):
-        file_path = os.path.join(input_dir, filename)
-        text = extract_text_from_pdf(file_path)
-        if text:
-            X_test = embedding_model.encode([text])
-            X_test_pca = pca.transform(X_test)
-            prediction = model.predict(X_test_pca)[0]
-            papers.append({'title': filename, 'publishable': prediction})
-classification_latency = time.time() - start_time
-
-results_file_path = os.path.join(output_dir, "paper_classification_results.csv")
-results_df = pd.DataFrame(papers)
-results_df.to_csv(results_file_path, index=False)
-
-if retrain == 'Y':
-    latency_data = {
-        "Step": ["Publishable PDFs", "Non-Publishable PDFs", "Vectorization", "PCA Dimensionality Reduction",
-                 "Model Training and Tuning", "Classification"],
-        "Latency (seconds)": [
-            locals().get('publishable_latency', 'N/A'),
-            locals().get('non_publishable_latency', 'N/A'),
-            locals().get('vectorization_latency', 'N/A'),
-            locals().get('pca_latency', 'N/A'),
-            locals().get('training_latency', 'N/A'),
-            classification_latency
-        ]
-    }
-else:
-    latency_data = {
-        "Step": ["Classification"],
-        "Latency (seconds)": [classification_latency]
-    }
-
-latency_df = pd.DataFrame(latency_data)
-print("\nLatency Summary:")
-print(latency_df)
+# Save results
+output_dir = "/path/to/local/output"
+os.makedirs(output_dir, exist_ok=True)
+results_df = pd.DataFrame(results)
+results_df.to_csv(os.path.join(output_dir, "paper_classification_results.csv"), index=False)
